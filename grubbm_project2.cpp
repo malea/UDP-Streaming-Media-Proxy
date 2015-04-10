@@ -26,6 +26,7 @@ using namespace std;
 
 mutex peer_table_mutex;
 
+/* Helper function that returns true if two addresses are equal, and false otherwise */
 bool sockaddr_eq(struct sockaddr_in6 &a, struct sockaddr_in6 &b) {
   //return memcmp(&a.sin6_addr.s6_addr, &b.sin6_addr.s6_addr, 16) &&
   //  a.sin6_port == b.sin6_port;
@@ -37,7 +38,7 @@ bool sockaddr_eq(struct sockaddr_in6 &a, struct sockaddr_in6 &b) {
   ) == 0;
 }
 
-/* Helper Function that returns a vector of strings split by a chosen deliminator */
+/* Helper function that returns a vector of strings split by a chosen deliminator */
 vector<string> tokenize(string str, char delim) {
   vector<string> tokens;
   stringstream ss(str);
@@ -47,7 +48,8 @@ vector<string> tokenize(string str, char delim) {
   }
   return tokens;
 }
-/* Helper function to remove all non alphanumeric characters from a string, then add '\0' to end */
+
+/* Helper function to remove all non alphanumeric characters from a string */
 string remove_junk(string str) {
   size_t i = 0;
   size_t len = str.length();
@@ -62,6 +64,7 @@ string remove_junk(string str) {
   }
   return str;
 }
+
 /* Helper function to retrieve a username from a string */
 string get_username(string message, string which) {
   string username;
@@ -133,6 +136,7 @@ bool call_was_ack(string message) {
   return true;
 }
 
+/* Media serving thread */
 void serve_better_media(int proxy_sockfd) {
   int peers = 0;
   struct sockaddr_in6 peer1;
@@ -151,8 +155,8 @@ void serve_better_media(int proxy_sockfd) {
     if (size < 0) { perror("bad media recv"); exit(1); }
 
     // First message comes in on port zero sometimes?
-    // Anyway, we can't respond to it or detect who it's from.
-    // Therefore, ignore it.
+    // Anyway, we can't respond to it or detect who it's from
+    // Therefore, ignore it
     if (source.sin6_port == 0) {
       continue;
     }
@@ -160,12 +164,14 @@ void serve_better_media(int proxy_sockfd) {
     string packet(buf, size);
 
     switch (peers) {
+      // this is the case of the first recieved packet with an address  coming in
       case 0:
         peer1 = source;
         slen1 = source_len;
         peers++;
         break;
 
+      // this is the case of the first receipt from the OTHER address coming in
       case 1:
         if (!sockaddr_eq(source, peer1)) {
           peer2 = source;
@@ -177,6 +183,8 @@ void serve_better_media(int proxy_sockfd) {
         }
         break;
 
+      // now send to proper address (we now have 2 addresses to match against so we know what to
+      // send where
       case 2:
         if (sockaddr_eq(source, peer1)) {
           int ret = sendto(proxy_sockfd, packet.c_str(), packet.size(), 0,
@@ -190,67 +198,16 @@ void serve_better_media(int proxy_sockfd) {
         }
         break;
 
+      // this should never happen, would mean there are too many different addresses coming in (more than 2)
       default:
         cerr << "too many cooks" << endl;
         exit(1);
     }
 
   }
-}
-
-/* This thread serves the media */
-void serve_media(struct sockaddr_in6 src, struct sockaddr_in6 dest, socklen_t srclen, 
-                 socklen_t destlen, int proxy_sockfd) {
-  struct sockaddr_in6 source;
-  int ret, ret2;
-  char buf[BUF_SIZE], cnt[60], clnt[60], svc[80], svce[80];
-  
-  // media port loop
-  while (true) {
-    char buf[BUF_SIZE];
-    memset(&buf, 0, BUF_SIZE);
-    memset(&cnt, 0, 60);
-    memset(&svc, 0, 80);
-    memset(&clnt, 0, 60);
-    memset(&svce, 0, 80);
-
-    // receive a packet
-    socklen_t size_source = sizeof(source);
-    ret = recvfrom(proxy_sockfd, buf, BUF_SIZE, 0, (struct sockaddr *)&source, &size_source);
-    if (ret == -1) {
-      perror("recvfrom in media serving");
-      exit(1);
-    }
-   
-    // use getnameinfo() to see who sent it, matching it against one of the clients 
-    // ret = getnameinfo((sockaddr*)&source, srclen, cnt, sizeof(cnt), svc, sizeof(svc), 0 | NI_NUMERICHOST);
-    // if (ret != 0) {
-    //   cerr << "getnameinfo(): " << gai_strerror(ret) << endl;
-    //   exit(1);
-    // }
-    // ret = getnameinfo((sockaddr*)&src, srclen, clnt, sizeof(clnt), svce, sizeof(svce), 0 | NI_NUMERICHOST);
-    // if (ret != 0) {
-    //   cerr << "getnameinfo(): " << gai_strerror(ret) << endl;
-    //   exit(1);
-    // }
-    // string current = string(cnt, sizeof(cnt));
-    // string pattern = string(clnt, sizeof(clnt));
-
-    // if a match, send to other client
-    if (sockaddr_eq(source, dest)) {
-      ret = sendto(proxy_sockfd, buf, BUF_SIZE, 0, (struct sockaddr *)&src, srclen);
-    }
-    // otherwise send it to the client it was not a match for
-    else {
-      ret = sendto(proxy_sockfd, buf, BUF_SIZE, 0, (struct sockaddr *)&dest, destlen);
-    }
-    if (ret == -1) {
-      perror("sendto in media serving");
-      exit(1);
-    }
-  }
   close(proxy_sockfd);
 }
+
 
 /* MAIN */
 int main(int argc, char *argv[]) {
@@ -261,6 +218,7 @@ int main(int argc, char *argv[]) {
   ssize_t size;
   int next_port = 5000;
 
+  // This portion of the code is for the testing of helper functions only
   #ifdef TEST_MODE
     string test = "REGISTER yodaballer1na";
     string test2 = "CALL FROM:yodaballer1na TO:maleangrubb35";
@@ -369,20 +327,9 @@ int main(int argc, char *argv[]) {
       // recipient found
       else {
 
-        // grab destination address string
-        //string a = itr->second;
-
         // set up destination address, convert string address to sockaddr_in6 address
         struct sockaddr_in6 dest = itr->second;
         socklen_t destlen;
-        //dest.sin6_family = AF_INET6;
-        //dest.sin6_port = htons(PORT);
-        //dest.sin6_addr = (itr->second).sin6_addr;
-        //ret = inet_pton(AF_INET6, a.c_str(), &dest.sin6_addr);
-        //if (ret == 0) {
-        //  cerr << "error converting address to sin6_addr" << endl;
-        //  return EXIT_FAILURE;
-        //}
 
         // send call notification to destination
         string note = "CALL FROM:" + from_user + " TO:" + to_user;
@@ -456,9 +403,6 @@ int main(int argc, char *argv[]) {
         } 
        
         // start a new thread to handle media path 
-        // new thread(serve_media, src, dest, srclen, destlen, proxy_sockfd);
-
-        // VERSION 2.BETTER
         new thread(serve_better_media, proxy_sockfd);
       }
     }

@@ -1,4 +1,4 @@
-# Network Programming Homework 2: Malea Grubb
+# Network Programming Project 2: Malea Grubb
 
 ## Compilation Instructions
 
