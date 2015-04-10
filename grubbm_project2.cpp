@@ -26,6 +26,16 @@ using namespace std;
 
 mutex peer_table_mutex;
 
+bool sockaddr_eq(struct sockaddr_in6 &a, struct sockaddr_in6 &b) {
+  //return memcmp(&a.sin6_addr.s6_addr, &b.sin6_addr.s6_addr, 16) &&
+  //  a.sin6_port == b.sin6_port;
+
+  return memcmp(
+      ((sockaddr*) &a)->sa_data,
+      ((sockaddr*) &b)->sa_data,
+      sizeof(((sockaddr*) &a)->sa_data)
+  ) == 0;
+}
 
 /* Helper Function that returns a vector of strings split by a chosen deliminator */
 vector<string> tokenize(string str, char delim) {
@@ -123,6 +133,71 @@ bool call_was_ack(string message) {
   return true;
 }
 
+void serve_better_media(int proxy_sockfd) {
+  int peers = 0;
+  struct sockaddr_in6 peer1;
+  struct sockaddr_in6 peer2;
+  socklen_t slen1 = sizeof(peer1);
+  socklen_t slen2 = sizeof(peer2);
+
+  while (true) {
+    char buf[BUF_SIZE];
+    memset(&buf, 0, BUF_SIZE);
+
+    struct sockaddr_in6 source;
+    socklen_t source_len;
+    int size = recvfrom(proxy_sockfd, buf, BUF_SIZE, 0,
+                        (struct sockaddr *)&source, &source_len);
+    if (size < 0) { perror("bad media recv"); exit(1); }
+
+    // First message comes in on port zero sometimes?
+    // Anyway, we can't respond to it or detect who it's from.
+    // Therefore, ignore it.
+    if (source.sin6_port == 0) {
+      continue;
+    }
+
+    string packet(buf, size);
+
+    switch (peers) {
+      case 0:
+        peer1 = source;
+        slen1 = source_len;
+        peers++;
+        break;
+
+      case 1:
+        if (!sockaddr_eq(source, peer1)) {
+          peer2 = source;
+          slen2 = source_len;
+          int ret = sendto(proxy_sockfd, packet.c_str(), packet.size(), 0,
+                           (struct sockaddr *)&peer1, slen1);
+          if (ret < 0) { perror("could not forward"); exit(1); }
+          peers++;
+        }
+        break;
+
+      case 2:
+        if (sockaddr_eq(source, peer1)) {
+          int ret = sendto(proxy_sockfd, packet.c_str(), packet.size(), 0,
+                           (struct sockaddr *)&peer2, slen2);
+          if (ret < 0) { perror("could not forward"); exit(1); }
+        }
+        else {
+          int ret = sendto(proxy_sockfd, packet.c_str(), packet.size(), 0,
+                           (struct sockaddr *)&peer1, slen1);
+          if (ret < 0) { perror("could not forward"); exit(1); }
+        }
+        break;
+
+      default:
+        cerr << "too many cooks" << endl;
+        exit(1);
+    }
+
+  }
+}
+
 /* This thread serves the media */
 void serve_media(struct sockaddr_in6 src, struct sockaddr_in6 dest, socklen_t srclen, 
                  socklen_t destlen, int proxy_sockfd) {
@@ -148,20 +223,21 @@ void serve_media(struct sockaddr_in6 src, struct sockaddr_in6 dest, socklen_t sr
     }
    
     // use getnameinfo() to see who sent it, matching it against one of the clients 
-    ret = getnameinfo((sockaddr*)&source, srclen, cnt, sizeof(cnt), svc, sizeof(svc), 0 | NI_NUMERICHOST);
-    if (ret != 0) {
-      cerr << "getnameinfo(): " << gai_strerror(ret) << endl;
-      exit(1);
-    }
-    ret = getnameinfo((sockaddr*)&src, srclen, clnt, sizeof(clnt), svce, sizeof(svce), 0 | NI_NUMERICHOST);
-    if (ret != 0) {
-      cerr << "getnameinfo(): " << gai_strerror(ret) << endl;
-      exit(1);
-    }
-    string current = string(cnt, sizeof(cnt));
-    string pattern = string(clnt, sizeof(clnt));
+    // ret = getnameinfo((sockaddr*)&source, srclen, cnt, sizeof(cnt), svc, sizeof(svc), 0 | NI_NUMERICHOST);
+    // if (ret != 0) {
+    //   cerr << "getnameinfo(): " << gai_strerror(ret) << endl;
+    //   exit(1);
+    // }
+    // ret = getnameinfo((sockaddr*)&src, srclen, clnt, sizeof(clnt), svce, sizeof(svce), 0 | NI_NUMERICHOST);
+    // if (ret != 0) {
+    //   cerr << "getnameinfo(): " << gai_strerror(ret) << endl;
+    //   exit(1);
+    // }
+    // string current = string(cnt, sizeof(cnt));
+    // string pattern = string(clnt, sizeof(clnt));
+
     // if a match, send to other client
-    if (current == pattern) {
+    if (sockaddr_eq(source, dest)) {
       ret = sendto(proxy_sockfd, buf, BUF_SIZE, 0, (struct sockaddr *)&src, srclen);
     }
     // otherwise send it to the client it was not a match for
@@ -178,7 +254,7 @@ void serve_media(struct sockaddr_in6 src, struct sockaddr_in6 dest, socklen_t sr
 
 /* MAIN */
 int main(int argc, char *argv[]) {
-  map<string,string> user_table;
+  map<string,struct sockaddr_in6> user_table;
   int sockfd, proxy_sockfd, ret;
   struct sockaddr_in6 src, bindaddr, proxyaddr;
   socklen_t srclen;
@@ -263,7 +339,7 @@ int main(int argc, char *argv[]) {
 
       // add username and address to the user table
       string client_address = string(cnt, strlen(cnt));
-      auto pair = user_table.emplace(username, client_address);
+      auto pair = user_table.emplace(username, src);
       // acknowledge registration to client
       string ack = "ACK_REGISTER " + username;
       ret = sendto(sockfd, ack.c_str(), ack.size(), 0, (struct sockaddr *)&src, srclen);
@@ -281,7 +357,7 @@ int main(int argc, char *argv[]) {
       string to_user = get_username(b, "TO");
      
       // look up the recipient in the user table
-      map<string,string>::iterator itr = user_table.find(to_user);
+      map<string,struct sockaddr_in6>::iterator itr = user_table.find(to_user);
 
       // if recipient is not in the user table, send CALL_FAILED message to calling user
       if (itr == user_table.end()) {
@@ -294,18 +370,19 @@ int main(int argc, char *argv[]) {
       else {
 
         // grab destination address string
-        string a = itr->second;
+        //string a = itr->second;
 
         // set up destination address, convert string address to sockaddr_in6 address
-        struct sockaddr_in6 dest;
+        struct sockaddr_in6 dest = itr->second;
         socklen_t destlen;
-        dest.sin6_family = AF_INET6;
-        dest.sin6_port = htons(PORT);
-        ret = inet_pton(AF_INET6, a.c_str(), &dest.sin6_addr);
-        if (ret == 0) {
-          cerr << "error converting address to sin6_addr" << endl;
-          return EXIT_FAILURE;
-        }
+        //dest.sin6_family = AF_INET6;
+        //dest.sin6_port = htons(PORT);
+        //dest.sin6_addr = (itr->second).sin6_addr;
+        //ret = inet_pton(AF_INET6, a.c_str(), &dest.sin6_addr);
+        //if (ret == 0) {
+        //  cerr << "error converting address to sin6_addr" << endl;
+        //  return EXIT_FAILURE;
+        //}
 
         // send call notification to destination
         string note = "CALL FROM:" + from_user + " TO:" + to_user;
@@ -334,6 +411,7 @@ int main(int argc, char *argv[]) {
         }
 
         // if the response was that the call failed, continue
+        note = string(res);
         if (!call_was_ack(note)) {
           continue;
         }
@@ -364,15 +442,24 @@ int main(int argc, char *argv[]) {
         // send media port announcing message to each peer
         string port_str = to_string(proxy_port);
         note = "MEDIA_PORT FROM:" + from_user + " TO:" + to_user + " " + port_str; 
-        ret = sendto(proxy_sockfd, note.c_str(), note.size(), 0, (struct sockaddr *)&dest, destlen);
-        size = sendto(proxy_sockfd, note.c_str(), note.size(), 0, (struct sockaddr *)&src, srclen);
-        if (ret == -1 || size == -1) {
+        ret = sendto(sockfd, note.c_str(), note.size(), 0, (struct sockaddr *)&dest, destlen);
+        if (ret == -1) {
+          perror("sendto");
+          return EXIT_FAILURE;
+        } 
+
+        note = "MEDIA_PORT FROM:" + to_user + " TO:" + from_user + " " + port_str; 
+        ret = sendto(sockfd, note.c_str(), note.size(), 0, (struct sockaddr *)&src, srclen);
+        if (ret == -1) {
           perror("sendto");
           return EXIT_FAILURE;
         } 
        
         // start a new thread to handle media path 
-        thread media_path(serve_media, src, dest, srclen, destlen, proxy_sockfd);
+        // new thread(serve_media, src, dest, srclen, destlen, proxy_sockfd);
+
+        // VERSION 2.BETTER
+        new thread(serve_better_media, proxy_sockfd);
       }
     }
     // we have received an improperly formatted message
