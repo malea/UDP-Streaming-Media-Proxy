@@ -28,8 +28,6 @@ mutex peer_table_mutex;
 
 /* Helper function that returns true if two addresses are equal, and false otherwise */
 bool sockaddr_eq(struct sockaddr_in6 &a, struct sockaddr_in6 &b) {
-  //return memcmp(&a.sin6_addr.s6_addr, &b.sin6_addr.s6_addr, 16) &&
-  //  a.sin6_port == b.sin6_port;
 
   return memcmp(
       ((sockaddr*) &a)->sa_data,
@@ -208,6 +206,23 @@ void serve_better_media(int proxy_sockfd) {
   close(proxy_sockfd);
 }
 
+/* Helper function that handles the registration of a client to the user table */
+void handle_registration(map<string,struct sockaddr_in6> &user_table, int sockfd,
+                         struct sockaddr_in6 src, string b, socklen_t srclen) {
+  // get username for user_table
+  string username = get_username(b, "REGISTRATION");
+
+  // add username and address to user_table 
+  auto pair = user_table.emplace(username, src);
+
+  // acknowledge registration to client
+  string ack = "ACK_REGISTER " + username;
+  int ret = sendto(sockfd, ack.c_str(), ack.size(), 0, (struct sockaddr *)&src, srclen);
+  if (ret == -1) {
+    perror("sendto");
+    exit(1);
+  }
+} 
 
 /* MAIN */
 int main(int argc, char *argv[]) {
@@ -289,22 +304,12 @@ int main(int argc, char *argv[]) {
       return EXIT_FAILURE;
     }
 
-    // check if buffer is a registration
+    // check if buffer is a registration, if it is, add username/address to table
     if (is_registration(b)) {
 
-      // get username for user table
-      string username = get_username(b, "REGISTRATION");
+      handle_registration(user_table, sockfd, src, b, srclen);
 
       // add username and address to the user table
-      string client_address = string(cnt, strlen(cnt));
-      auto pair = user_table.emplace(username, src);
-      // acknowledge registration to client
-      string ack = "ACK_REGISTER " + username;
-      ret = sendto(sockfd, ack.c_str(), ack.size(), 0, (struct sockaddr *)&src, srclen);
-      if (ret == -1) {
-        perror("sendto");
-        return EXIT_FAILURE;
-      }
       continue;
     }
 
